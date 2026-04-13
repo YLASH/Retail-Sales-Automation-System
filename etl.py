@@ -14,8 +14,13 @@ import pandas as pd
 from google.oauth2.service_account import Credentials
 
 # ── 設定區（只改這裡）────────────────────────────────────
-SPREADSHEET_ID       = "1J3xmqKpuFbcAcus5DdrtWeYNlBZchcNhm21i0xajReg"
-SERVICE_ACCOUNT_FILE = "service_account.json"
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
+
 
 SHEET_RAW    = "daily_raw_clean"
 SHEET_DAILY  = "daily_summary"

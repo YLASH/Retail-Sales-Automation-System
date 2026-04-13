@@ -11,8 +11,12 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ── 設定 ─────────────────────────────────────────────────
-SPREADSHEET_ID       = "1J3xmqKpuFbcAcus5DdrtWeYNlBZchcNhm21i0xajReg"
-SERVICE_ACCOUNT_FILE = "service_account.json"
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
 
 HOLIDAYS = {
     "2026/02/14": "情人節",

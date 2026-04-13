@@ -11,9 +11,12 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 
 # ─── 設定區（只需改這裡）────────────────────────────────
-SPREADSHEET_ID = "1J3xmqKpuFbcAcus5DdrtWeYNlBZchcNhm21i0xajReg"   # URL 裡 /d/ 後面那串
-# https://docs.google.com/spreadsheets/d/1J3xmqKpuFbcAcus5DdrtWeYNlBZchcNhm21i0xajReg/edit?usp=sharing
-SERVICE_ACCOUNT_FILE = "service_account.json"
+import os
+from dotenv import load_dotenv
+load_dotenv()
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
+
 
 SHEET_DAILY_RAW = "daily_raw_clean"
 SHEET_TARGET    = "target"
