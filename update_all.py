@@ -245,6 +245,111 @@ def step_etl():
     write(SHEET_DAILY,  daily,  ["date","weekday","week_num","target_cups","target_rev","actual_cups","actual_rev","achieved_pct"])
     write(SHEET_WEEKLY, weekly, ["week_num","actual_cups","actual_rev","avg_cups_per_hour","peak_hour"])
 
+# ════════════════════════════════════════════════════════
+#  Step 3：ML 預測 → 寫回 ml_predictions sheet
+# ════════════════════════════════════════════════════════
+def step_ml_predictions():
+    import gspread
+    import pandas as pd
+    import numpy as np
+    from google.oauth2.service_account import Credentials
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import LinearRegression
+    from sklearn.metrics import mean_absolute_percentage_error
+ 
+    SHEET_RAW     = "daily_raw_clean"
+    SHEET_ML      = "ml_predictions"
+    HOLIDAYS_LIST = [
+        "2026/02/14","2026/02/16","2026/02/17","2026/02/18",
+        "2026/02/19","2026/02/20","2026/02/21","2026/02/22",
+    ]
+ 
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds  = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+    sh     = gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
+ 
+    # 讀 raw
+    values = sh.worksheet(SHEET_RAW).get_all_values()
+    df = pd.DataFrame(values[1:], columns=values[0])
+    df = df.loc[:, df.columns.str.strip() != ""]
+    df = df[df.iloc[:, 0].str.strip() != ""].reset_index(drop=True)
+    df = df.rename(columns={"Date":"date","Time":"time","cups":"cups","revenues":"revenue","Week_num":"week_num"})
+    df["date"]    = pd.to_datetime(df["date"], format="mixed")
+    df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
+    df["hour"]    = df["time"].apply(lambda v: int(str(v).split(":")[0]) if ":" in str(v) else int(float(v)*24))
+    df["weekday"]    = df["date"].dt.dayofweek
+    df["is_weekend"] = (df["weekday"] >= 5).astype(int)
+    df["is_holiday"] = df["date"].dt.strftime("%Y/%m/%d").isin(HOLIDAYS_LIST).astype(int)
+    df = df[df["revenue"] > 0]
+ 
+    weeks = sorted(df["week_num"].unique())
+    if len(weeks) < 3:
+        print("  ⚠️  資料不足 3 週，跳過 ML 計算")
+        return
+ 
+    # Train = 除最後一週，Test = 最後一週
+    test_week = weeks[-1]
+    train = df[df["week_num"] != test_week]
+    test  = df[df["week_num"] == test_week].copy()
+ 
+    features = ["weekday", "hour", "is_weekend", "is_holiday"]
+    X_train, y_train = train[features], train["revenue"]
+    X_test           = test[features]
+ 
+    # Baseline：同 weekday 同 hour 均值
+    baseline_preds = []
+    for _, row in test.iterrows():
+        mask = (train["weekday"] == row["weekday"]) & (train["hour"] == row["hour"])
+        hist = train[mask]["revenue"]
+        baseline_preds.append(hist.mean() if not hist.empty else y_train.mean())
+ 
+    # Linear Regression
+    lr = LinearRegression()
+    lr.fit(X_train, y_train)
+    lr_preds = lr.predict(X_test)
+ 
+    # Random Forest
+    rf = RandomForestRegressor(n_estimators=100, random_state=42)
+    rf.fit(X_train, y_train)
+    rf_preds = rf.predict(X_test)
+ 
+    # MAPE
+    y_test = test["revenue"]
+    bl_mape = round(mean_absolute_percentage_error(y_test, baseline_preds) * 100, 1)
+    lr_mape = round(mean_absolute_percentage_error(y_test, lr_preds) * 100, 1)
+    rf_mape = round(mean_absolute_percentage_error(y_test, rf_preds) * 100, 1)
+ 
+    # 組成寫回的 DataFrame
+    test = test.copy()
+    test["baseline_pred"] = [round(v) for v in baseline_preds]
+    test["lr_pred"]       = [round(v) for v in lr_preds]
+    test["rf_pred"]       = [round(v) for v in rf_preds]
+    test["date_str"]      = test["date"].dt.strftime("%Y/%m/%d")
+ 
+    # MAPE 摘要列
+    summary_rows = [
+        ["#MAPE", "baseline", "lr", "rf", "", "", "", ""],
+        ["#MAPE_VALUE", bl_mape, lr_mape, rf_mape, "", "", "", ""],
+    ]
+ 
+    # 明細列
+    cols = ["date_str", "week_num", "time", "revenue", "baseline_pred", "lr_pred", "rf_pred", "is_holiday"]
+    detail_rows = test[cols].values.tolist()
+    detail_rows = [[str(v) for v in row] for row in detail_rows]
+ 
+    # 寫回
+    ws = sh.worksheet(SHEET_ML)
+    ws.clear()
+    header = [["date","week_num","time","actual","baseline_pred","lr_pred","rf_pred","is_holiday"]]
+    ws.update(header + summary_rows + detail_rows, "A1")
+ 
+    print(f"  ml_predictions：{len(detail_rows)} 筆（測試週 {test_week}）")
+    print(f"  MAPE → Baseline: {bl_mape}%  LR: {lr_mape}%  RF: {rf_mape}%")
+
+
 
 # ════════════════════════════════════════════════════════
 #  主程式
@@ -256,8 +361,9 @@ def main():
     print(f"{'═'*40}")
 
     results = [
-        run_step("Step 1 / 2  Calculate target", step_calculate_target),
-        run_step("Step 2 / 2  ETL → Sheets",     step_etl),
+        run_step("Step 1 / 3  Calculate target", step_calculate_target),
+        run_step("Step 2 / 3  ETL → Sheets",     step_etl),
+        run_step("Step 3 / 3  ML predictions",   step_ml_predictions),
     ]
 
     elapsed = (datetime.now() - start).seconds
