@@ -289,65 +289,103 @@ def step_ml_predictions():
     if len(weeks) < 3:
         print("  ⚠️  資料不足 3 週，跳過 ML 計算")
         return
- 
-    # Train = 除最後一週，Test = 最後一週
-    test_week = weeks[-1]
-    train = df[df["week_num"] != test_week]
-    test  = df[df["week_num"] == test_week].copy()
- 
+    
     features = ["weekday", "hour", "is_weekend", "is_holiday"]
-    X_train, y_train = train[features], train["revenue"]
-    X_test           = test[features]
+    
+    # ── Walk-Forward Validation（滾動驗證）──────────────────
+    # 從第 3 週開始，每次用前面所有週訓練，預測下一週
+    # 避免 data leakage，每週都有預測值可以比較
+    all_preds = []
+    mape_by_week = []
  
-    # Baseline：同 weekday 同 hour 均值
-    baseline_preds = []
-    for _, row in test.iterrows():
-        mask = (train["weekday"] == row["weekday"]) & (train["hour"] == row["hour"])
-        hist = train[mask]["revenue"]
-        baseline_preds.append(hist.mean() if not hist.empty else y_train.mean())
+    for i in range(2, len(weeks)):
+        test_week  = weeks[i]
+        train_wks  = weeks[:i]
+        train = df[df["week_num"].isin(train_wks)]
+        test  = df[df["week_num"] == test_week].copy()
  
-    # Linear Regression
-    lr = LinearRegression()
-    lr.fit(X_train, y_train)
-    lr_preds = lr.predict(X_test)
+        if len(test) == 0:
+            continue
  
-    # Random Forest
-    rf = RandomForestRegressor(n_estimators=100, random_state=42)
-    rf.fit(X_train, y_train)
-    rf_preds = rf.predict(X_test)
+        X_train, y_train = train[features], train["revenue"]
+        X_test,  y_test  = test[features],  test["revenue"]
  
-    # MAPE
-    y_test = test["revenue"]
-    bl_mape = round(mean_absolute_percentage_error(y_test, baseline_preds) * 100, 1)
-    lr_mape = round(mean_absolute_percentage_error(y_test, lr_preds) * 100, 1)
-    rf_mape = round(mean_absolute_percentage_error(y_test, rf_preds) * 100, 1)
+        # Baseline
+        bl_preds = []
+        for _, row in test.iterrows():
+            mask = (train["weekday"] == row["weekday"]) & (train["hour"] == row["hour"])
+            hist = train[mask]["revenue"]
+            bl_preds.append(hist.mean() if not hist.empty else y_train.mean())
  
-    # 組成寫回的 DataFrame
-    test = test.copy()
-    test["baseline_pred"] = [round(v) for v in baseline_preds]
-    test["lr_pred"]       = [round(v) for v in lr_preds]
-    test["rf_pred"]       = [round(v) for v in rf_preds]
-    test["date_str"]      = test["date"].dt.strftime("%Y/%m/%d")
+        # LR
+        lr = LinearRegression()
+        lr.fit(X_train, y_train)
+        lr_preds = lr.predict(X_test)
  
-    # MAPE 摘要列
+        # RF
+        rf = RandomForestRegressor(n_estimators=100, random_state=42)
+        rf.fit(X_train, y_train)
+        rf_preds = rf.predict(X_test)
+ 
+        # 記錄每筆預測
+        test = test.copy()
+        test["baseline_pred"] = [round(v) for v in bl_preds]
+        test["lr_pred"]       = [round(v) for v in lr_preds]
+        test["rf_pred"]       = [round(v) for v in rf_preds]
+        test["train_weeks"]   = len(train_wks)
+        all_preds.append(test)
+ 
+        # 每週 MAPE
+        bl_m = round(mean_absolute_percentage_error(y_test, bl_preds) * 100, 1)
+        lr_m = round(mean_absolute_percentage_error(y_test, lr_preds) * 100, 1)
+        rf_m = round(mean_absolute_percentage_error(y_test, rf_preds) * 100, 1)
+        mape_by_week.append({
+            "week_num": test_week,
+            "bl_mape": bl_m,
+            "lr_mape": lr_m,
+            "rf_mape": rf_m,
+        })
+        print(f"  {test_week}：Baseline {bl_m}%  LR {lr_m}%  RF {rf_m}%")
+ 
+    # 合併所有週預測
+    all_df = pd.concat(all_preds, ignore_index=True)
+    all_df["date_str"] = all_df["date"].dt.strftime("%Y/%m/%d")
+ 
+    # 整體 MAPE（所有週平均）
+    mape_df = pd.DataFrame(mape_by_week)
+    avg_bl = round(mape_df["bl_mape"].mean(), 1)
+    avg_lr = round(mape_df["lr_mape"].mean(), 1)
+    avg_rf = round(mape_df["rf_mape"].mean(), 1)
+ 
+    # 組寫回資料
+    # 第一段：整體 MAPE 摘要
     summary_rows = [
-        ["#MAPE", "baseline", "lr", "rf", "", "", "", ""],
-        ["#MAPE_VALUE", bl_mape, lr_mape, rf_mape, "", "", "", ""],
+        ["#MAPE_AVG", "baseline", "lr", "rf", "", "", "", "", ""],
+        ["#MAPE_VALUE", avg_bl, avg_lr, avg_rf, "", "", "", "", ""],
     ]
+    # 第二段：每週 MAPE
+    for row in mape_by_week:
+        summary_rows.append([
+            f"#MAPE_WEEK", row["week_num"],
+            row["bl_mape"], row["lr_mape"], row["rf_mape"],
+            "", "", "", ""
+        ])
  
-    # 明細列
-    cols = ["date_str", "week_num", "time", "revenue", "baseline_pred", "lr_pred", "rf_pred", "is_holiday"]
-    detail_rows = test[cols].values.tolist()
+    # 第三段：明細
+    cols = ["date_str","week_num","time","revenue","baseline_pred","lr_pred","rf_pred","is_holiday","train_weeks"]
+    detail_rows = all_df[cols].values.tolist()
     detail_rows = [[str(v) for v in row] for row in detail_rows]
  
     # 寫回
     ws = sh.worksheet(SHEET_ML)
     ws.clear()
-    header = [["date","week_num","time","actual","baseline_pred","lr_pred","rf_pred","is_holiday"]]
+    header = [["date","week_num","time","actual","baseline_pred","lr_pred","rf_pred","is_holiday","train_weeks"]]
     ws.update(header + summary_rows + detail_rows, "A1")
  
-    print(f"  ml_predictions：{len(detail_rows)} 筆（測試週 {test_week}）")
-    print(f"  MAPE → Baseline: {bl_mape}%  LR: {lr_mape}%  RF: {rf_mape}%")
+    print(f"  ─────────────────────────────")
+    print(f"  整體平均 MAPE → Baseline: {avg_bl}%  LR: {avg_lr}%  RF: {avg_rf}%")
+    print(f"  涵蓋週別：{mape_by_week[0]['week_num']} ～ {mape_by_week[-1]['week_num']}，共 {len(mape_by_week)} 週")
+    print(f"  ml_predictions：{len(detail_rows)} 筆時段預測")
 
 
 
@@ -359,13 +397,13 @@ def main():
     print(f"\n{'═'*40}")
     print(f"  update_all  {start.strftime('%Y-%m-%d %H:%M')}")
     print(f"{'═'*40}")
-
+ 
     results = [
         run_step("Step 1 / 3  Calculate target", step_calculate_target),
         run_step("Step 2 / 3  ETL → Sheets",     step_etl),
         run_step("Step 3 / 3  ML predictions",   step_ml_predictions),
     ]
-
+ 
     elapsed = (datetime.now() - start).seconds
     print(f"\n{'═'*40}")
     if all(results):
@@ -375,7 +413,7 @@ def main():
         print(f"  有步驟失敗，請查看上方錯誤訊息")
     print(f"{'═'*40}\n")
     sys.exit(0 if all(results) else 1)
-
-
+ 
+ 
 if __name__ == "__main__":
     main()

@@ -24,7 +24,8 @@ HOLIDAYS = {
     "2026/02/18": "春節連假", "2026/02/19": "春節連假",
     "2026/02/20": "春節連假", "2026/02/21": "春節連假",
     "2026/02/22": "春節連假",
-    "2026/02/28": "228和平紀念日"
+"2026/02/28": "228和平紀念日","2026/04/04":"清明節","2026/04/05":"兒童節",
+"2025/05/01":"勞動節",
 }
 # ────────────────────────────────────────────────────────
 
@@ -55,7 +56,9 @@ def load_data():
         df = df[df.iloc[:, 0].str.strip() != ""].reset_index(drop=True)
         return df
 
-    return read("daily_summary"), read("weekly_summary"), read("daily_raw_clean")
+    # return read("daily_summary"), read("weekly_summary"), read("daily_raw_clean")
+    ml_pred = read("ml_predictions")
+    return read("daily_summary"), read("weekly_summary"), read("daily_raw_clean"), ml_pred
 
 
 # ── 前處理 ───────────────────────────────────────────────
@@ -95,7 +98,7 @@ st.title("📊 門市業績 Dashboard")
 
 with st.spinner("讀取 Google Sheets..."):
     try:
-        daily_raw, weekly_raw, raw_raw = load_data()
+        daily_raw, weekly_raw, raw_raw, ml_raw = load_data()
         daily  = prep_daily(daily_raw)
         weekly = prep_weekly(weekly_raw)
         raw    = prep_raw(raw_raw)
@@ -115,6 +118,16 @@ with tab_week:
     sel_wk = st.selectbox("選擇週別", weeks, index=len(weeks)-1, key="wk")
 
     wdf = daily[daily["week_num"] == sel_wk].sort_values("date")
+    wdf["label"] = wdf.apply(
+        lambda r: r["date"].strftime("%m/%d(%a)") + (" ★" if r["holiday"] else ""), axis=1
+    )
+
+     # 週別日期範圍標示
+    if not wdf.empty:
+        w_start = wdf["date"].min().strftime("%m/%d")
+        w_end   = wdf["date"].max().strftime("%m/%d")
+        w_label = f"{sel_wk}　{w_start} ～ {w_end}"
+        st.markdown(f"<h4 style='margin:0 0 12px;color:var(--text-color)'>{w_label}</h4>", unsafe_allow_html=True)
     wdf["label"] = wdf.apply(
         lambda r: r["date"].strftime("%m/%d(%a)") + (" ★" if r["holiday"] else ""), axis=1
     )
@@ -219,7 +232,102 @@ with tab_week:
     )
     st.plotly_chart(fig4, use_container_width=True)
 
-
+     # ── ML 預測區塊 ──────────────────────────────────────
+    st.divider()
+    st.subheader("🤖 ML 模型預測比較（Walk-Forward Validation）")
+ 
+    if ml_raw.empty:
+        st.info("尚無 ML 預測資料，請先執行 update_all.py")
+    else:
+        # 解析 ml_predictions sheet
+        # 摘要列（#MAPE_AVG, #MAPE_WEEK）和明細列分開
+        mape_avg  = ml_raw[ml_raw["date"] == "#MAPE_AVG"]
+        mape_week = ml_raw[ml_raw["date"] == "#MAPE_WEEK"]
+        detail    = ml_raw[~ml_raw["date"].str.startswith("#")].copy()
+ 
+        # 整體 MAPE 卡
+        if not mape_avg.empty:
+            avg_row = mape_avg.iloc[1] if len(mape_avg) > 1 else None
+            try:
+                avg_bl = float(ml_raw[ml_raw["date"]=="#MAPE_VALUE"]["week_num"].values[0])
+                avg_lr = float(ml_raw[ml_raw["date"]=="#MAPE_VALUE"]["time"].values[0])
+                avg_rf = float(ml_raw[ml_raw["date"]=="#MAPE_VALUE"]["actual"].values[0])
+                col_m1, col_m2, col_m3 = st.columns(3)
+                col_m1.metric("Baseline 平均 MAPE", f"{avg_bl}%")
+                col_m2.metric("Linear Regression 平均 MAPE", f"{avg_lr}%")
+                col_m3.metric("Random Forest 平均 MAPE", f"{avg_rf}%",
+                              f"比 Baseline 改善 {round(avg_bl-avg_rf,1)}%")
+                st.caption("Walk-Forward Validation：每週用前面所有週訓練，預測下一週，數字越小越準")
+            except Exception:
+                pass
+ 
+        # 每週 MAPE 折線圖
+        if not mape_week.empty:
+            wm = mape_week.copy()
+            wm.columns = ml_raw.columns
+            wm = wm.rename(columns={"week_num":"week","time":"bl","actual":"lr","baseline_pred":"rf"})
+            for c in ["bl","lr","rf"]:
+                wm[c] = pd.to_numeric(wm[c], errors="coerce")
+ 
+            fig_mape = go.Figure()
+            fig_mape.add_scatter(x=wm["week"], y=wm["bl"],
+                                 name="Baseline", mode="lines+markers",
+                                 line=dict(color="#B4B2A9", dash="dot"), marker=dict(size=6))
+            fig_mape.add_scatter(x=wm["week"], y=wm["lr"],
+                                 name="Linear Regression", mode="lines+markers",
+                                 line=dict(color="#BA7517", dash="dash"), marker=dict(size=6))
+            fig_mape.add_scatter(x=wm["week"], y=wm["rf"],
+                                 name="Random Forest", mode="lines+markers",
+                                 line=dict(color="#1D9E75", width=2), marker=dict(size=7))
+            fig_mape.update_layout(
+                title="各週 MAPE 趨勢（越低越準）",
+                height=260, margin=dict(t=40,b=20,l=0,r=0),
+                yaxis=dict(ticksuffix="%"),
+                legend=dict(orientation="h", x=1.0, y=1.0, xanchor="right", yanchor="bottom"),
+            )
+            st.plotly_chart(fig_mape, use_container_width=True)
+ 
+        # 每日實際 vs 預測折線圖（選週別）
+        if not detail.empty:
+            for c in ["actual","baseline_pred","lr_pred","rf_pred"]:
+                detail[c] = pd.to_numeric(detail[c], errors="coerce").fillna(0)
+            detail["date_dt"] = pd.to_datetime(detail["date"], format="mixed")
+ 
+            ml_weeks = sorted(detail["week_num"].unique())
+            sel_ml_wk = st.selectbox("ML 預測週別", ml_weeks,
+                                      index=len(ml_weeks)-1, key="ml_wk")
+ 
+            wdet = detail[detail["week_num"] == sel_ml_wk]
+            daily_cmp = wdet.groupby("date_dt").agg(
+                actual      = ("actual",       "sum"),
+                baseline    = ("baseline_pred", "sum"),
+                lr          = ("lr_pred",       "sum"),
+                rf          = ("rf_pred",       "sum"),
+            ).reset_index()
+            daily_cmp["label"] = daily_cmp["date_dt"].apply(
+                lambda d: d.strftime("%m/%d(%a)") + (" ★" if HOLIDAYS.get(d.strftime("%Y/%m/%d")) else "")
+            )
+ 
+            fig_ml = go.Figure()
+            fig_ml.add_scatter(x=daily_cmp["label"], y=daily_cmp["actual"],
+                               name="實際", mode="lines+markers",
+                               line=dict(color="#378ADD", width=2), marker=dict(size=7))
+            fig_ml.add_scatter(x=daily_cmp["label"], y=daily_cmp["baseline"],
+                               name="Baseline", mode="lines+markers",
+                               line=dict(color="#B4B2A9", width=1.5, dash="dot"), marker=dict(size=5))
+            fig_ml.add_scatter(x=daily_cmp["label"], y=daily_cmp["lr"],
+                               name="Linear Regression", mode="lines+markers",
+                               line=dict(color="#BA7517", width=2, dash="dash"), marker=dict(size=6))
+            fig_ml.add_scatter(x=daily_cmp["label"], y=daily_cmp["rf"],
+                               name="Random Forest", mode="lines+markers",
+                               line=dict(color="#1D9E75", width=2, dash="dash"), marker=dict(size=6))
+            fig_ml.update_layout(
+                title=f"每日營業額：實際 vs 預測（{sel_ml_wk}）",
+                height=300, margin=dict(t=40,b=20,l=0,r=0),
+                yaxis=dict(tickprefix="$", tickformat=","),
+                legend=dict(orientation="h", x=1.0, y=1.0, xanchor="right", yanchor="bottom"),
+            )
+            st.plotly_chart(fig_ml, use_container_width=True)
 # ════════════════════════════════════════════════════════
 #  日報
 # ════════════════════════════════════════════════════════
@@ -230,8 +338,14 @@ with tab_day:
     date_ts   = pd.to_datetime(sel_date)
     holiday   = HOLIDAYS.get(sel_date, "")
 
-    st.caption(f"{date_ts.strftime('%A')}{'  ★ ' + holiday if holiday else ''}")
-
+   # 日期和節日標示放大
+    holiday_badge = f"　<span style='background:#FAEEDA;color:#633806;padding:2px 10px;border-radius:4px;font-size:14px'>★ {holiday}</span>" if holiday else ""
+    st.markdown(
+        f"<div style='font-size:22px;font-weight:500;margin-bottom:8px'>"
+        f"{date_ts.strftime('%Y/%m/%d')}　{date_ts.strftime('%A')}{holiday_badge}</div>",
+        unsafe_allow_html=True
+    )
+ 
     drow = daily[daily["date"] == date_ts]
     if not drow.empty:
         r = drow.iloc[0]
@@ -239,7 +353,7 @@ with tab_day:
         d1.metric("當日營業額", f"${int(r['actual_rev']):,}", f"目標 ${int(r['target_rev']):,}")
         d2.metric("當日杯數",   f"{int(r['actual_cups'])}",  f"目標 {int(r['target_cups'])}")
         d3.metric("達成率",     f"{r['achieved_pct']}%" if pd.notna(r["achieved_pct"]) else "—")
-
+ 
     st.divider()
 
     hour_df = raw[raw["date"] == date_ts].sort_values("time")
